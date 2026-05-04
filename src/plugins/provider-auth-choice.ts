@@ -5,6 +5,7 @@ import {
   resolveAgentWorkspaceDir,
 } from "../agents/agent-scope.js";
 import { upsertAuthProfile } from "../agents/auth-profiles.js";
+import { formatLiteralProviderPrefixedModelRef } from "../agents/model-ref-shared.js";
 import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -54,6 +55,13 @@ export type PluginProviderAuthChoiceOptions = {
   label: string;
 };
 
+function formatModelRefForDisplay(modelRef: string, provider: ProviderPlugin): string {
+  if (!provider.preserveLiteralProviderPrefix) {
+    return modelRef;
+  }
+  return formatLiteralProviderPrefixedModelRef(provider.id, modelRef);
+}
+
 function restoreConfiguredPrimaryModel(
   nextConfig: OpenClawConfig,
   originalConfig: OpenClawConfig,
@@ -100,37 +108,46 @@ function resolveConfiguredDefaultModelPrimary(cfg: OpenClawConfig): string | und
 async function noteDefaultModelResult(params: {
   previousPrimary: string | undefined;
   selectedModel: string;
+  selectedModelDisplay?: string;
   preserveExistingDefaultModel: boolean | undefined;
   prompter: WizardPrompter;
 }): Promise<void> {
+  const selectedModelDisplay = params.selectedModelDisplay ?? params.selectedModel;
   if (
     params.preserveExistingDefaultModel === true &&
     params.previousPrimary &&
     params.previousPrimary !== params.selectedModel
   ) {
     await params.prompter.note(
-      `Kept existing default model ${params.previousPrimary}; ${params.selectedModel} is available.`,
+      `Kept existing default model ${params.previousPrimary}; ${selectedModelDisplay} is available.`,
       "Model configured",
     );
     return;
   }
 
-  await params.prompter.note(`Default model set to ${params.selectedModel}`, "Model configured");
+  await params.prompter.note(`Default model set to ${selectedModelDisplay}`, "Model configured");
 }
 
 async function applyDefaultModelFromAuthChoice(params: {
   config: OpenClawConfig;
+  configBeforeProviderAuth?: OpenClawConfig;
   selectedModel: string;
+  selectedModelDisplay?: string;
   preserveExistingDefaultModel: boolean | undefined;
   prompter: WizardPrompter;
   runSelectedModelHook: (config: OpenClawConfig) => Promise<void>;
 }): Promise<OpenClawConfig> {
-  const previousPrimary = resolveConfiguredDefaultModelPrimary(params.config);
+  const defaultModelBaseConfig = params.configBeforeProviderAuth ?? params.config;
+  const previousPrimary = resolveConfiguredDefaultModelPrimary(defaultModelBaseConfig);
   const preservesDifferentPrimary =
     params.preserveExistingDefaultModel === true &&
     previousPrimary !== undefined &&
     previousPrimary !== params.selectedModel;
-  const nextConfig = applyDefaultModel(params.config, params.selectedModel, {
+  const defaultModelConfig =
+    params.preserveExistingDefaultModel === true
+      ? restoreConfiguredPrimaryModel(params.config, defaultModelBaseConfig)
+      : params.config;
+  const nextConfig = applyDefaultModel(defaultModelConfig, params.selectedModel, {
     preserveExistingPrimary: params.preserveExistingDefaultModel === true,
   });
   if (!preservesDifferentPrimary) {
@@ -139,6 +156,7 @@ async function applyDefaultModelFromAuthChoice(params: {
   await noteDefaultModelResult({
     previousPrimary,
     selectedModel: params.selectedModel,
+    selectedModelDisplay: params.selectedModelDisplay,
     preserveExistingDefaultModel: params.preserveExistingDefaultModel,
     prompter: params.prompter,
   });
@@ -360,6 +378,9 @@ export async function applyAuthChoiceLoadedPluginProvider(
         pluginId: installCatalogEntry.pluginId,
         label: installCatalogEntry.label,
         install: installCatalogEntry.install,
+        ...(installCatalogEntry.origin === "bundled"
+          ? { trustedSourceLinkedOfficialInstall: true }
+          : {}),
       },
       prompter: params.prompter,
       runtime: params.runtime,
@@ -382,6 +403,7 @@ export async function applyAuthChoiceLoadedPluginProvider(
     nextConfig = enabledConfig;
   }
 
+  const configBeforeProviderAuth = nextConfig;
   const applied = await runProviderPluginAuthMethod({
     config: nextConfig,
     env: params.env,
@@ -400,10 +422,13 @@ export async function applyAuthChoiceLoadedPluginProvider(
   let agentModelOverride: string | undefined;
   if (applied.defaultModel) {
     const selectedModel = applied.defaultModel;
+    const selectedModelDisplay = formatModelRefForDisplay(selectedModel, resolved.provider);
     if (params.setDefaultModel) {
       nextConfig = await applyDefaultModelFromAuthChoice({
         config: nextConfig,
+        configBeforeProviderAuth,
         selectedModel,
+        selectedModelDisplay,
         preserveExistingDefaultModel: params.preserveExistingDefaultModel,
         prompter: params.prompter,
         runSelectedModelHook: async (config) => {
@@ -474,6 +499,7 @@ export async function applyAuthChoicePluginProvider(
     return { config: nextConfig };
   }
 
+  const configBeforeProviderAuth = nextConfig;
   const applied = await runProviderPluginAuthMethod({
     config: nextConfig,
     env: params.env,
@@ -491,10 +517,13 @@ export async function applyAuthChoicePluginProvider(
   nextConfig = applied.config;
   if (applied.defaultModel) {
     const selectedModel = applied.defaultModel;
+    const selectedModelDisplay = formatModelRefForDisplay(selectedModel, provider);
     if (params.setDefaultModel) {
       nextConfig = await applyDefaultModelFromAuthChoice({
         config: nextConfig,
+        configBeforeProviderAuth,
         selectedModel,
+        selectedModelDisplay,
         preserveExistingDefaultModel: params.preserveExistingDefaultModel,
         prompter: params.prompter,
         runSelectedModelHook: async (config) => {
@@ -511,7 +540,7 @@ export async function applyAuthChoicePluginProvider(
     }
     if (params.agentId) {
       await params.prompter.note(
-        `Default model set to ${selectedModel} for agent "${params.agentId}".`,
+        `Default model set to ${selectedModelDisplay} for agent "${params.agentId}".`,
         "Model configured",
       );
     }
